@@ -8,6 +8,9 @@ import { useDispatch, useSelector } from 'react-redux'
 import { fetchMenuItems } from '../../redux/slices/menuSlice'
 import { fetchCustomers, addCustomer } from '../../redux/slices/customerSlice'
 import { createTransaction } from '../../redux/slices/transactionSlice'
+import { fetchSubCategories } from '../../redux/slices/subCategorySlice'; // Import fetchSubCategories
+import { fetchCategories } from '../../redux/slices/categorySlice';
+
 import jsPDF from 'jspdf'
 import html2canvas from 'html2canvas'
 import CustomerModal from '../../components/CustomerModal'
@@ -22,6 +25,8 @@ import DiscountModal from '../../components/DiscountModal'
 import PaymentModal from '../../components/PaymentModal'
 import DeleteModal from '../../components/DeleteModal'
 import RoundOffAmountModal from '../../components/RoundOffAmountModal'
+import SubCategorySelectionModal from '../../components/SubCategorySelectionModal'; // Import the new modal
+
 
 const POSTableContent = () => {
   const dispatch = useDispatch()
@@ -30,6 +35,9 @@ const POSTableContent = () => {
   const { tableNumber } = useParams()
   const { customers, loading: customerLoading } = useSelector((state) => state.customers)
   const { menuItems, loading: menuItemsLoading } = useSelector((state) => state.menuItems)
+  const { categories, loading: categoryLoading } = useSelector((state) => state.category); // Get categories and loading state
+  const { subCategories, loading: subCategoryLoading } = useSelector((state) => state.subCategory); // Get subcategories
+
   const restaurantId = useSelector((state) => state.auth.restaurantId)
   const theme = useSelector((state) => state.theme.theme)
 
@@ -57,6 +65,10 @@ const POSTableContent = () => {
   const [searchProduct, setSearchProduct] = useState('')
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [itemToDelete, setItemToDelete] = useState(null)
+  const [selectedCategoryId, setSelectedCategoryId] = useState(null); // New state to track selected category
+  const [showSubCategoryModal, setShowSubCategoryModal] = useState(false); // New state for modal visibility
+  const [selectedMenuItemForSubcategory, setSelectedMenuItemForSubcategory] = useState(null); // New state to hold the item needing subcategory selection
+
   const [cart, setCart] = useState(() => {
     const savedCart = localStorage.getItem(`cart_${tableNumber}`)
     return savedCart ? JSON.parse(savedCart) : []
@@ -70,6 +82,7 @@ const POSTableContent = () => {
     pdfUrl: null,
     message: '',
   })
+
 
   useEffect(() => {
     if (startTime) {
@@ -86,6 +99,8 @@ const POSTableContent = () => {
     if (restaurantId) {
       dispatch(fetchMenuItems({ restaurantId }))
       dispatch(fetchCustomers({ restaurantId }))
+      dispatch(fetchCategories({ restaurantId })); // Fetch categories here
+      dispatch(fetchSubCategories({ token: localStorage.getItem('authToken') })); // Fetch all subcategories
     }
   }, [dispatch, restaurantId])
 
@@ -115,9 +130,49 @@ const POSTableContent = () => {
     customer.name?.toLowerCase().includes(searchTerm.toLowerCase()),
   )
 
-  const filteredMenuItems = menuItems?.filter((product) =>
-    product.itemName?.toLowerCase().includes(searchProduct.toLowerCase()),
-  )
+  // Filter menu items by selected category
+  const filteredMenuItems = React.useMemo(() => {
+    let items = menuItems;
+    if (selectedCategoryId) {
+      items = items?.filter(item => item.categoryId === selectedCategoryId);
+    }
+    // Also apply existing product search filter
+    return items?.filter((product) =>
+      product.itemName?.toLowerCase().includes(searchProduct.toLowerCase()),
+    );
+  }, [menuItems, selectedCategoryId, searchProduct]);
+
+  // New function to handle adding to cart when subcategory is selected
+  const handleAddToCartWithSubcategory = useCallback((item) => {
+    const existingItemIndex = cart.findIndex(
+      (cartItem) =>
+        cartItem.id === item.id &&
+        cartItem.selectedSubcategoryId === item.selectedSubcategoryId // Check subcategory for uniqueness
+    );
+
+    if (existingItemIndex > -1) {
+      setCart(
+        cart.map((cartItem, index) =>
+          index === existingItemIndex
+            ? { ...cartItem, quantity: cartItem.quantity + 1 }
+            : cartItem,
+        ),
+      );
+    } else {
+      setCart([...cart, { ...item, quantity: 1 }]);
+    }
+
+    if (!startTime) {
+      const now = new Date();
+      setStartTime(now);
+      localStorage.setItem(`start_time_${tableNumber}`, now.toISOString());
+    }
+    setShowSubCategoryModal(false); // Close modal
+    setSelectedMenuItemForSubcategory(null); // Clear selected item
+  }, [cart, startTime, tableNumber]);
+
+
+
 
   const handleCustomerSelect = (customer) => {
     setSelectedCustomerName(customer.name)
@@ -127,6 +182,52 @@ const POSTableContent = () => {
   const handleSearchProduct = (e) => {
     setSearchProduct(e.target.value)
   }
+
+  // Modify original addToCart to check for subcategories first
+  const handleMenuItemClick = useCallback((product) => {
+    // Check if the product has associated subcategories
+    // This assumes your product object has a way to identify if it needs subcategory selection.
+    // E.g., `product.hasSubcategories` boolean, or `product.sub_category_ids` array.
+    // For now, let's assume `product.sub_category` is a field that indicates a subcategory relationship,
+    // and we check if a relevant subcategory exists in the `subCategories` list.
+    const itemHasSubcategories = subCategories.some(sub => sub.category_id === product.categoryId);
+
+    // IMPORTANT: The `sub_category` field in `menuItems` (from `menuSlice`)
+    // needs to correctly indicate if an item should prompt for subcategory selection.
+    // If `menuItems` (from the backend) contains a `sub_category` property (which is an ID),
+    // and `subCategories` (from the backend) contains subcategories that belong to `product.categoryId`,
+    // then we can infer that this item *might* need a subcategory selection.
+    // You might need to adjust your menu item data structure or API response to explicitly
+    // indicate if an item has variants/subcategories.
+
+    // A simpler check might be to see if there are any subcategories for this item's category.
+    const relevantSubcategoriesExist = subCategories.some(sub => sub.category_id === product.categoryId);
+
+
+    // If the item needs subcategory selection OR if there are any subcategories for its category
+    if (relevantSubcategoriesExist) {
+      setSelectedMenuItemForSubcategory(product);
+      setShowSubCategoryModal(true);
+    } else {
+      // No subcategories, add directly to cart (using the original addToCart logic)
+      const existingItem = cart.find((item) => item.id === product.id);
+      if (existingItem) {
+        setCart(
+          cart.map((item) =>
+            item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item,
+          ),
+        );
+      } else {
+        setCart([...cart, { ...product, quantity: 1 }]);
+      }
+      if (!startTime) {
+        const now = new Date();
+        setStartTime(now);
+        localStorage.setItem(`start_time_${tableNumber}`, now.toISOString());
+      }
+    }
+  }, [cart, startTime, tableNumber, subCategories]); // Include subCategories in dependency array
+
 
   const addToCart = (product) => {
     const existingItem = cart.find((item) => item.id === product.id)
@@ -282,25 +383,25 @@ const POSTableContent = () => {
       })
   }
 
-const handleInvoicePrint = () => {
-  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-    navigator.userAgent
-  );
+  const handleInvoicePrint = () => {
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+      navigator.userAgent
+    );
 
-  if (isMobile) {
-    if (/Android/i.test(navigator.userAgent)) {
-      // Android-specific printing solution
-      handleAndroidPrint();
-    } else if (/iPad|iPhone|iPod/.test(navigator.userAgent)) {
-      handleMobileDownload('ios');
+    if (isMobile) {
+      if (/Android/i.test(navigator.userAgent)) {
+        // Android-specific printing solution
+        handleAndroidPrint();
+      } else if (/iPad|iPhone|iPod/.test(navigator.userAgent)) {
+        handleMobileDownload('ios');
+      } else {
+        handleMobileDownload('other');
+      }
     } else {
-      handleMobileDownload('other');
-    }
-  } else {
-    // Desktop printing - existing implementation
-    const printWindow = window.open();
-    if (printWindow) {
-      printWindow.document.write(`
+      // Desktop printing - existing implementation
+      const printWindow = window.open();
+      if (printWindow) {
+        printWindow.document.write(`
         <html>
           <head>
             <title>Invoice Print</title>
@@ -330,16 +431,16 @@ const handleInvoicePrint = () => {
           </body>
         </html>
       `);
-      printWindow.document.close();
+        printWindow.document.close();
+      }
     }
-  }
-};
+  };
 
-const handleAndroidPrint = () => {
-  // Create a new window with the invoice image
-  const printWindow = window.open('', '_blank');
-  if (printWindow) {
-    printWindow.document.write(`
+  const handleAndroidPrint = () => {
+    // Create a new window with the invoice image
+    const printWindow = window.open('', '_blank');
+    if (printWindow) {
+      printWindow.document.write(`
       <html>
         <head>
           <title>Print Invoice</title>
@@ -368,76 +469,76 @@ const handleAndroidPrint = () => {
         </body>
       </html>
     `);
-    printWindow.document.close();
-  } else {
-    // Fallback if popup blocked
-    setMobilePrintOptions({
-      show: true,
-      pdfUrl: invoiceImage, // Use the image directly
-      message: 'Please allow popups to print. Then tap the image and select "Print" from your browser menu.'
+      printWindow.document.close();
+    } else {
+      // Fallback if popup blocked
+      setMobilePrintOptions({
+        show: true,
+        pdfUrl: invoiceImage, // Use the image directly
+        message: 'Please allow popups to print. Then tap the image and select "Print" from your browser menu.'
+      });
+    }
+  };
+
+  const handleMobileDownload = (platform) => {
+    // Create a PDF from the invoice image using a library like jsPDF
+    import('jspdf').then((jsPDF) => {
+      const { jsPDF: JSPDF } = jsPDF;
+      const doc = new JSPDF({
+        orientation: 'portrait',
+        unit: 'in',
+        format: [2, 8], // 2-inch width receipt
+      });
+
+      // Add the image to the PDF
+      const img = new Image();
+      img.src = invoiceImage;
+      img.onload = () => {
+        // Calculate height based on aspect ratio
+        const ratio = img.height / img.width;
+        const imgHeight = 2 * ratio; // 2-inch width with proper aspect ratio
+
+        doc.addImage(invoiceImage, 'PNG', 0, 0, 2, imgHeight);
+
+        if (platform === 'ios') {
+          // For iOS, we can offer to open in another app
+          const pdfOutput = doc.output('blob');
+          const pdfUrl = URL.createObjectURL(pdfOutput);
+
+          // Show options dialog for iOS
+          setMobilePrintOptions({
+            show: true,
+            pdfUrl,
+            message:
+              'iOS devices require you to download the PDF and print from Files or another app.',
+          });
+        } else if (platform === 'android') {
+          // For Android, similar approach but with Android-specific guidance
+          const pdfOutput = doc.output('blob');
+          const pdfUrl = URL.createObjectURL(pdfOutput);
+
+          // Show options dialog for Android
+          setMobilePrintOptions({
+            show: true,
+            pdfUrl,
+            message: "Download the PDF and use your device's print service or a printing app.",
+          });
+        } else {
+          // Generic mobile approach
+          const pdfOutput = doc.output('blob');
+          const pdfUrl = URL.createObjectURL(pdfOutput);
+
+          setMobilePrintOptions({
+            show: true,
+            pdfUrl,
+            message: 'Download the invoice as PDF to print from another app.',
+          });
+        }
+      };
+    }).catch((error) => {
+      toast.error(`Error preparing mobile print: ${error}`, { autoClose: 3000 });
     });
-  }
-};
-
-const handleMobileDownload = (platform) => {
-  // Create a PDF from the invoice image using a library like jsPDF
-  import('jspdf').then((jsPDF) => {
-    const { jsPDF: JSPDF } = jsPDF;
-    const doc = new JSPDF({
-      orientation: 'portrait',
-      unit: 'in',
-      format: [2, 8], // 2-inch width receipt
-    });
-
-    // Add the image to the PDF
-    const img = new Image();
-    img.src = invoiceImage;
-    img.onload = () => {
-      // Calculate height based on aspect ratio
-      const ratio = img.height / img.width;
-      const imgHeight = 2 * ratio; // 2-inch width with proper aspect ratio
-
-      doc.addImage(invoiceImage, 'PNG', 0, 0, 2, imgHeight);
-
-      if (platform === 'ios') {
-        // For iOS, we can offer to open in another app
-        const pdfOutput = doc.output('blob');
-        const pdfUrl = URL.createObjectURL(pdfOutput);
-
-        // Show options dialog for iOS
-        setMobilePrintOptions({
-          show: true,
-          pdfUrl,
-          message:
-            'iOS devices require you to download the PDF and print from Files or another app.',
-        });
-      } else if (platform === 'android') {
-        // For Android, similar approach but with Android-specific guidance
-        const pdfOutput = doc.output('blob');
-        const pdfUrl = URL.createObjectURL(pdfOutput);
-
-        // Show options dialog for Android
-        setMobilePrintOptions({
-          show: true,
-          pdfUrl,
-          message: "Download the PDF and use your device's print service or a printing app.",
-        });
-      } else {
-        // Generic mobile approach
-        const pdfOutput = doc.output('blob');
-        const pdfUrl = URL.createObjectURL(pdfOutput);
-
-        setMobilePrintOptions({
-          show: true,
-          pdfUrl,
-          message: 'Download the invoice as PDF to print from another app.',
-        });
-      }
-    };
-  }).catch((error) => {
-    toast.error(`Error preparing mobile print: ${error}`, { autoClose: 3000 });
-  });
-};
+  };
 
 
   const handleSendEmail = () => {
@@ -513,9 +614,9 @@ const handleMobileDownload = (platform) => {
 
   const MobilePrintOptionsModal = ({ isVisible, options, onClose }) => {
     if (!isVisible || !options) return null
-  
+
     const isAndroid = /Android/i.test(navigator.userAgent)
-  
+
     return (
       <div className="mobile-print-modal" style={{
         position: 'fixed',
@@ -539,11 +640,11 @@ const handleMobileDownload = (platform) => {
         }}>
           <h3>Print Options</h3>
           <p>{options.message}</p>
-          
+
           {isAndroid && (
-            <div className="android-options" style={{marginBottom: '15px'}}>
+            <div className="android-options" style={{ marginBottom: '15px' }}>
               <p><strong>Android Printing Instructions:</strong></p>
-              <ol style={{textAlign: 'left', paddingLeft: '20px'}}>
+              <ol style={{ textAlign: 'left', paddingLeft: '20px' }}>
                 <li>Download the PDF using the button below</li>
                 <li>Open your Downloads folder</li>
                 <li>Tap on the invoice.pdf file</li>
@@ -552,15 +653,15 @@ const handleMobileDownload = (platform) => {
               </ol>
             </div>
           )}
-          
+
           <div className="button-group" style={{
             display: 'flex',
             flexDirection: 'column',
             gap: '10px'
           }}>
-            <a 
-              href={options.pdfUrl} 
-              download="invoice.pdf" 
+            <a
+              href={options.pdfUrl}
+              download="invoice.pdf"
               className="btn btn-primary"
               style={{
                 padding: '10px 15px',
@@ -574,12 +675,12 @@ const handleMobileDownload = (platform) => {
             >
               Download PDF
             </a>
-            
-            <button 
+
+            <button
               onClick={() => {
                 handleSendEmail()
                 onClose()
-              }} 
+              }}
               className="btn btn-secondary"
               style={{
                 padding: '10px 15px',
@@ -592,9 +693,9 @@ const handleMobileDownload = (platform) => {
               Send via Email
             </button>
           </div>
-          
-          <button 
-            onClick={onClose} 
+
+          <button
+            onClick={onClose}
             className="btn btn-light mt-3"
             style={{
               padding: '10px 15px',
@@ -624,9 +725,13 @@ const handleMobileDownload = (platform) => {
             searchProduct={searchProduct}
             handleSearchProduct={handleSearchProduct}
             tableNumber={tableNumber}
-            menuItemsLoading={menuItemsLoading}
+            menuItemsLoading={menuItemsLoading || categoryLoading || subCategoryLoading} // Combine all loading states
             filteredMenuItems={filteredMenuItems}
+            onMenuItemClick={handleMenuItemClick} // Pass the new click handler
             addToCart={addToCart}
+            categories={categories} // Pass categories
+            selectedCategoryId={selectedCategoryId} // Pass selected category
+            setSelectedCategoryId={setSelectedCategoryId} // Pass setter for selected category
           />
         </CCol>
         <CCol md={4} sm={12}>
@@ -679,6 +784,16 @@ const handleMobileDownload = (platform) => {
                 </CButton>
               </div>
             </div>
+
+            {/* Place ALL modal components here, directly under the main CContainer's return block */}
+            <SubCategorySelectionModal
+              visible={showSubCategoryModal}
+              onClose={() => setShowSubCategoryModal(false)}
+              menuItem={selectedMenuItemForSubcategory}
+              subCategories={subCategories}
+              onAddToCartWithSubcategory={handleAddToCartWithSubcategory}
+            />
+
 
             <KOTModal isVisible={showKOTModal} onClose={() => setShowKOTModal(false)}>
               <div style={{ textAlign: 'center' }}>
